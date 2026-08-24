@@ -185,7 +185,7 @@ function New-EurekaDocName {
         [string]$Id,
 
         [Parameter(Mandatory = $true)]
-        [string]$Jour
+        [datetime]$Date
     )
 
     $cleanId = $Id.Trim()
@@ -193,10 +193,55 @@ function New-EurekaDocName {
         throw "L'identifiant du document est vide."
     }
 
-    $date = Convert-JourToDate -Jour $Jour
-    $dateText = $date.ToString("yyyyMMdd")
+    $dateText = $Date.ToString("yyyyMMdd")
 
     return "pdf$([char]0x00B7)$dateText$([char]0x00B7)$cleanId"
+}
+
+function Get-EurekaPublicationDate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Html
+    )
+
+    # La date figure dans <span class="pdf-source-name"> ... <span class="pdf-source-weekday">lundi,</span> 24 aout 2026</span>
+    $match = [regex]::Match(
+        $Html,
+        '(?is)<span\b[^>]*\bpdf-source-name\b[^>]*>(?<content>.{0,400})'
+    )
+
+    if (-not $match.Success) {
+        return $null
+    }
+
+    $text = [regex]::Replace($match.Groups["content"].Value, '(?is)<[^>]+>', ' ')
+    $text = [System.Net.WebUtility]::HtmlDecode($text)
+
+    # Suppression des accents pour un appariement fiable des mois.
+    $normalized = $text.ToLowerInvariant().Normalize([System.Text.NormalizationForm]::FormD)
+    $normalized = ($normalized.ToCharArray() | Where-Object {
+        [System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne [System.Globalization.UnicodeCategory]::NonSpacingMark
+    }) -join ''
+
+    $months = @{
+        "janvier" = 1; "fevrier" = 2; "mars" = 3; "avril" = 4
+        "mai" = 5; "juin" = 6; "juillet" = 7; "aout" = 8
+        "septembre" = 9; "octobre" = 10; "novembre" = 11; "decembre" = 12
+    }
+
+    $monthPattern = 'janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre'
+
+    $withDay = [regex]::Match($normalized, "(?<day>\d{1,2})\s+(?<month>$monthPattern)\s+(?<year>\d{4})")
+    if ($withDay.Success) {
+        return [datetime]::new([int]$withDay.Groups["year"].Value, $months[$withDay.Groups["month"].Value], [int]$withDay.Groups["day"].Value)
+    }
+
+    $monthYear = [regex]::Match($normalized, "(?<month>$monthPattern)\s+(?<year>\d{4})")
+    if ($monthYear.Success) {
+        return [datetime]::new([int]$monthYear.Groups["year"].Value, $months[$monthYear.Groups["month"].Value], 1)
+    }
+
+    return $null
 }
 
 function Get-WebExceptionBody {
@@ -293,6 +338,139 @@ function Convert-Indexes {
     return ,$result
 }
 
+function Get-EurekaPageIds {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+
+        [string]$Filter,
+
+        [Parameter(Mandatory = $true)]
+        $Session
+    )
+
+    $sourceCode = $Id.Trim()
+    if ([string]::IsNullOrWhiteSpace($sourceCode)) {
+        throw "L'identifiant sourceCode est vide."
+    }
+
+    $encodedSourceCode = [System.Uri]::EscapeDataString($sourceCode)
+    $editionUrl = "https://nouveau.eureka.cc/Pdf/Edition?sourceCode=$encodedSourceCode&source=%2FPdf%3Fsection%3Dmobile"
+    $headers = @{
+        "accept" = "text/html, */*; q=0.01"
+        "referer" = "https://nouveau.eureka.cc/"
+        "x-requested-with" = "XMLHttpRequest"
+    }
+
+    try {
+        $response = Invoke-WebRequest `
+            -UseBasicParsing `
+            -Uri $editionUrl `
+            -WebSession $Session `
+            -Headers $headers
+    }
+    catch {
+        throw "Impossible de recuperer la liste des pages pour $sourceCode : $($_.Exception.Message)"
+    }
+
+    $responseUri = $null
+    try {
+        $responseUri = $response.BaseResponse.ResponseUri.AbsoluteUri
+    }
+    catch {
+        $responseUri = $null
+    }
+
+    if (
+        $response.Content -match "Login\?ErrorCode" -or
+        $responseUri -match "/Login"
+    ) {
+        throw "La session Eureka a expire ou n'est plus authentifiee."
+    }
+
+    $html = [string]$response.Content
+    $pagesSpan = [regex]::Match(
+        $html,
+        '(?is)<span\b[^>]*>(?:\s|&nbsp;)*PAGES(?:\s|&nbsp;)*</span>'
+    )
+
+    if (-not $pagesSpan.Success) {
+        throw "La section PAGES est introuvable pour $sourceCode."
+    }
+
+    $afterPages = $html.Substring($pagesSpan.Index + $pagesSpan.Length)
+    $listMatch = [regex]::Match(
+        $afterPages,
+        '(?is)<(?<tag>ul|ol)\b[^>]*>(?<list>.*?)</\k<tag>\s*>'
+    )
+
+    if (-not $listMatch.Success) {
+        throw "La liste HTML des pages est introuvable pour $sourceCode."
+    }
+
+    $filterValue = $null
+    if (-not [string]::IsNullOrWhiteSpace($Filter)) {
+        $filterValue = $Filter.Trim()
+    }
+
+    $pageIds = @()
+    $pageSpans = [regex]::Matches(
+        $listMatch.Groups["list"].Value,
+        '(?is)<span\b[^>]*class\s*=\s*[""''][^""'']*\bpdf-page\b[^""'']*[""''][^>]*>(?<label>.*?)</span\s*>'
+    )
+
+    foreach ($pageSpan in $pageSpans) {
+        $pageLabel = [regex]::Replace(
+            $pageSpan.Groups["label"].Value,
+            '(?is)<[^>]+>',
+            ' '
+        )
+        $pageLabel = [System.Net.WebUtility]::HtmlDecode($pageLabel)
+        $pageLabel = [regex]::Replace($pageLabel, '\s+', ' ').Trim()
+
+        if ([string]::IsNullOrWhiteSpace($pageLabel)) {
+            continue
+        }
+
+        $pageSuffix = $pageLabel -replace '^Page\s+', ''
+        $pageSeparator = [char]0x00B7
+        if ($sourceCode.EndsWith($pageSeparator)) {
+            $pageSeparator = ''
+        }
+
+        $pageId = "$sourceCode$pageSeparator$pageSuffix"
+
+        if ($filterValue) {
+            if (
+                $pageId.IndexOf($filterValue, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                $pageLabel.IndexOf($filterValue, [System.StringComparison]::OrdinalIgnoreCase) -lt 0
+            ) {
+                continue
+            }
+        }
+
+        $pageIds += $pageId
+    }
+
+    if ($pageIds.Count -eq 0) {
+        if ($filterValue) {
+            throw "Aucune page contenant '$filterValue' n'a ete trouvee pour $sourceCode."
+        }
+
+        throw "Aucune page n'a ete trouvee pour $sourceCode."
+    }
+
+    $pubDate = Get-EurekaPublicationDate -Html $html
+    if (-not $pubDate) {
+        throw "La date de publication est introuvable pour $sourceCode."
+    }
+
+    return [PSCustomObject]@{
+        Date    = $pubDate
+        PageIds = $pageIds
+    }
+}
+
 function Ensure-Pillow {
     $py = Get-Command py -ErrorAction SilentlyContinue
     if (-not $py) {
@@ -327,14 +505,17 @@ function Download-EurekaDocument {
 
         [string[]]$Indexes,
 
+        [string[]]$PageIds,
+
+        [string]$Filter,
+
+        [switch]$ResolvePages,
+
         [Parameter(Mandatory = $true)]
         $Session,
 
         [switch]$KeepImages
     )
-
-    $date = Convert-JourToDate -Jour $Jour
-    $dateText = $date.ToString("yyyyMMdd")
 
     $cleanEdition = $Edition.Trim()
     if ([string]::IsNullOrWhiteSpace($cleanEdition)) {
@@ -342,52 +523,8 @@ function Download-EurekaDocument {
     }
 
     $safeEdition = $cleanEdition -replace '[\\/:*?"<>|]', '_'
-    $safeJour = $Jour.Trim().ToUpperInvariant() -replace '[\\/:*?"<>|]', '_'
 
-    # Tous les PDF d'une execution vont dans le repertoire de la date du jour.
-    $runDateText = (Get-Date).ToString("yyyyMMdd")
-    $outputFolder = Join-Path $env:USERPROFILE "Downloads\Eureka\$runDateText"
-
-    # Nom final lisible, par exemple : Ouest France quimper J-1.pdf
-    $pdfName = "$safeEdition $safeJour.pdf"
-    $pdfPath = Join-Path $outputFolder $pdfName
-
-    # Repertoire temporaire unique pour les PNG de ce document.
-    $safeId = $Id.Trim() -replace '[\\/:*?"<>|]', '_'
-    $folder = Join-Path $outputFolder ("_work_" + $safeEdition + "_" + $safeJour + "_" + $safeId)
-
-    # Si le PDF existe deja dans le repertoire du jour, ne rien telecharger.
-    if (Test-Path -LiteralPath $pdfPath -PathType Leaf) {
-        Write-Host "============================================================"
-        Write-Host "Document : $Id"
-        Write-Host "Edition  : $cleanEdition"
-        Write-Host "Jour     : $Jour"
-        Write-Host "Date doc : $dateText"
-        Write-Host "PDF deja present : $pdfPath"
-        Write-Host "Telechargement ignore."
-        Write-Host "============================================================"
-        Write-Host ""
-
-        return [PSCustomObject]@{
-            Id      = $Id
-            Edition = $cleanEdition
-            Jour    = $Jour
-            Date    = $dateText
-            Pages   = $null
-            PdfPath = $pdfPath
-            Success = $true
-            Skipped = $true
-        }
-    }
-
-    New-Item -ItemType Directory -Force -Path $outputFolder | Out-Null
-    New-Item -ItemType Directory -Force -Path $folder | Out-Null
-
-    Get-ChildItem `
-        -Path $folder `
-        -Filter "page-*.png" `
-        -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     $headersList = @{
         "accept" = "text/html, */*; q=0.01"
@@ -402,21 +539,72 @@ function Download-EurekaDocument {
         "x-requested-with" = "XMLHttpRequest"
     }
 
+    # La date de publication est lue directement sur le site.
+    if ($ResolvePages) {
+        $editionInfo = Get-EurekaPageIds -Id $Id -Filter $Filter -Session $Session
+        $PageIds = @($editionInfo.PageIds)
+        $pubDate = $editionInfo.Date
+    }
+    else {
+        $pubDate = Convert-JourToDate -Jour $Jour
+    }
+
+    $dateText = $pubDate.ToString("yyyyMMdd")
+
+    # Chaque PDF est range dans le repo : journaux\<edition>\<date>.pdf
+    $outputFolder = Join-Path $PSScriptRoot ("journaux\" + $safeEdition)
+    $pdfName = "$dateText.pdf"
+    $pdfPath = Join-Path $outputFolder $pdfName
+
+    $safeId = $Id.Trim() -replace '[\\/:*?"<>|]', '_'
+    $folder = Join-Path $outputFolder ("_work_" + $safeId + "_" + $dateText)
+
+    # La version lue sur le site est-elle deja presente dans le repo ? Si oui, pas de telechargement.
+    if (Test-Path -LiteralPath $pdfPath -PathType Leaf) {
+        Write-Host "$cleanEdition ($dateText) deja present, telechargement ignore : $pdfPath"
+
+        return [PSCustomObject]@{
+            Id       = $Id
+            Edition  = $cleanEdition
+            Date     = $dateText
+            Pages    = $null
+            PdfPath  = $pdfPath
+            Duration = $null
+            Success  = $true
+            Skipped  = $true
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path $outputFolder | Out-Null
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+
+    Get-ChildItem `
+        -Path $folder `
+        -Filter "page-*.png" `
+        -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
+    $hasPageIds = @($PageIds).Count -gt 0
+    $hasIndexes = @($Indexes).Count -gt 0
+
     Write-Host "============================================================"
     Write-Host "Document : $Id"
     Write-Host "Edition  : $cleanEdition"
-    Write-Host "Jour     : $Jour"
-    Write-Host "Date doc : $dateText"
+    Write-Host "Date     : $dateText"
 
-    if ($Indexes -and $Indexes.Count -gt 0) {
-        $docName = New-EurekaDocName -Id $Id -Jour $Jour
+    if ($hasPageIds) {
+        Write-Host "Mode     : pages resolues depuis la liste HTML"
+        Write-Host ("Pages    : " + ($PageIds -join ", "))
+    }
+    elseif ($hasIndexes) {
+        $docName = New-EurekaDocName -Id $Id -Date $pubDate
         Write-Host "Mode     : prefixe + indexes explicites"
         Write-Host "Prefixe  : $docName"
         Write-Host ("Indexes  : " + ($Indexes -join ", "))
     }
     else {
         Write-Host "Mode     : ID complet de la premiere page"
-        Write-Host "Premiere : $(New-EurekaDocName -Id $Id -Jour $Jour)"
+        Write-Host "Premiere : $(New-EurekaDocName -Id $Id -Date $pubDate)"
     }
 
     Write-Host "Sortie   : $outputFolder"
@@ -426,18 +614,39 @@ function Download-EurekaDocument {
     $maxPages = 1000
     $downloadedPages = 0
 
-    if ($Indexes -and $Indexes.Count -gt 0) {
-        # Mode 1 : Id est un prefixe, Indexes contient tous les suffixes exacts.
-        $docName = New-EurekaDocName -Id $Id -Jour $Jour
+    if ($hasPageIds -or $hasIndexes) {
+        $pageRequests = @()
+
+        if ($hasPageIds) {
+            foreach ($pageId in $PageIds) {
+                $pageRequests += [PSCustomObject]@{
+                    PageId  = $pageId
+                    DocName = (New-EurekaDocName -Id $pageId -Date $pubDate)
+                    Label   = $pageId
+                }
+            }
+        }
+        else {
+            $docName = New-EurekaDocName -Id $Id -Date $pubDate
+
+            foreach ($pageIndex in $Indexes) {
+                $pageRequests += [PSCustomObject]@{
+                    PageId  = "$Id$pageIndex"
+                    DocName = "$docName$pageIndex"
+                    Label   = "Index $pageIndex"
+                }
+            }
+        }
+
         $position = 0
 
-        foreach ($pageIndex in $Indexes) {
+        foreach ($pageRequest in $pageRequests) {
             $position++
 
-            $pageDocName = "$docName$pageIndex"
+            $pageDocName = $pageRequest.DocName
             $encodedDocName = [System.Uri]::EscapeDataString($pageDocName)
 
-            Write-Host ("[{0}/{1}] Index {2}..." -f $position, $Indexes.Count, $pageIndex)
+            Write-Host ("[{0}/{1}] {2}..." -f $position, $pageRequests.Count, $pageRequest.Label)
 
             $imageListUrl = "https://nouveau.eureka.cc/Pdf/ImageList?docName=$encodedDocName"
 
@@ -450,7 +659,7 @@ function Download-EurekaDocument {
                     -ContentType "application/json; charset=utf-8"
             }
             catch {
-                throw "Impossible de recuperer l'index $pageIndex pour $Id : $($_.Exception.Message)"
+                throw "Impossible de recuperer '$($pageRequest.Label)' pour $Id : $($_.Exception.Message)"
             }
 
             if (
@@ -473,7 +682,7 @@ function Download-EurekaDocument {
                     -ContentType "application/json; charset=utf-8"
             }
             catch {
-                throw "Impossible de telecharger l'index $pageIndex pour $Id : $($_.Exception.Message)"
+                throw "Impossible de telecharger '$($pageRequest.Label)' pour $Id : $($_.Exception.Message)"
             }
 
             if ($response.Content -match "Login\?ErrorCode") {
@@ -486,7 +695,7 @@ function Download-EurekaDocument {
                 $bytes = [Convert]::FromBase64String($base64)
             }
             catch {
-                throw "L'index $pageIndex de $Id n'a pas retourne une image Base64 valide."
+                throw "'$($pageRequest.Label)' de $Id n'a pas retourne une image Base64 valide."
             }
 
             if (
@@ -536,7 +745,7 @@ function Download-EurekaDocument {
             $position++
             $indexText = $pageNumber.ToString(("D{0}" -f $indexWidth))
             $pageId = "$idPrefix$indexText"
-            $pageDocName = New-EurekaDocName -Id $pageId -Jour $Jour
+            $pageDocName = New-EurekaDocName -Id $pageId -Date $pubDate
             $encodedDocName = [System.Uri]::EscapeDataString($pageDocName)
 
             Write-Host ("[{0}] {1}..." -f $position, $pageId)
@@ -699,20 +908,28 @@ finally:
         Remove-Item -Path $folder -Force -Recurse -ErrorAction SilentlyContinue
     }
 
-    Write-Host "Termine : $pdfPath"
+    $elapsed = $stopwatch.Elapsed
+    Write-Host ("Termine : {0} en {1:mm\:ss}" -f $pdfPath, $elapsed)
     Write-Host ""
 
     return [PSCustomObject]@{
-        Id      = $Id
-        Edition = $cleanEdition
-        Jour    = $Jour
-        Date    = $dateText
-        Pages   = $pages
-        PdfPath = $pdfPath
-        Success = $true
-        Skipped = $false
+        Id       = $Id
+        Edition  = $cleanEdition
+        Date     = $dateText
+        Pages    = $pages
+        PdfPath  = $pdfPath
+        Duration = $elapsed
+        Success  = $true
+        Skipped  = $false
     }
 }
+
+$logFolder = Join-Path $PSScriptRoot "logs"
+New-Item -ItemType Directory -Force -Path $logFolder | Out-Null
+$outputLog = Join-Path $logFolder ("eureka_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+Start-Transcript -Path $outputLog | Out-Null
+
+try {
 
 if ($SetupCredentials) {
     Save-VarennesCredential -Path $CredentialPath
@@ -727,8 +944,8 @@ Fournissez soit un document unique :
 ou avec indexes explicites :
     .\Eureka.ps1 -Id "OP_P$([char]0x00B7)" -Jour "J-1" -Edition "Journal de Montreal" -Indexes "[1,43,65,78]"
 
-soit un fichier CSV :
-    .\Eureka_batch.ps1 -Liste ".\documents.csv"
+soit un fichier CSV (colonnes : Id,Filter,Jour,Edition) :
+    .\Eureka.ps1 -Liste ".\documents.csv"
 "@
 }
 
@@ -777,9 +994,14 @@ if (-not [string]::IsNullOrWhiteSpace($Liste)) {
         throw "Impossible de lire le fichier CSV '$Liste' : $($_.Exception.Message)"
     }
 
+    $hasFilterColumn = $false
+    if ($rows) {
+        $hasFilterColumn = $null -ne $rows[0].PSObject.Properties["Filter"]
+    }
+
     foreach ($row in $rows) {
         $rowId = [string]$row.Id
-        $rowJour = [string]$row.Jour
+        $rowFilter = [string]$row.Filter
         $rowEdition = [string]$row.Edition
         $rowIndexes = [string]$row.Indexes
 
@@ -787,26 +1009,25 @@ if (-not [string]::IsNullOrWhiteSpace($Liste)) {
             continue
         }
 
-        if ([string]::IsNullOrWhiteSpace($rowJour)) {
-            $rowJour = "J-0"
-        }
-
         if ([string]::IsNullOrWhiteSpace($rowEdition)) {
             $rowEdition = "_SansEdition"
         }
 
         $parsedIndexes = Convert-Indexes -IndexesText $rowIndexes
+        $resolvePages = $hasFilterColumn -and [string]::IsNullOrWhiteSpace($rowIndexes)
 
         $documents += [PSCustomObject]@{
-            Id      = $rowId.Trim()
-            Jour    = $rowJour.Trim()
-            Edition = $rowEdition.Trim()
-            Indexes = $parsedIndexes
+            Id           = $rowId.Trim()
+            Filter       = $rowFilter.Trim()
+            Jour         = "J-0"
+            Edition      = $rowEdition.Trim()
+            Indexes      = $parsedIndexes
+            ResolvePages = $resolvePages
         }
     }
 
     if ($documents.Count -eq 0) {
-        throw "Le fichier CSV ne contient aucun document valide. Colonnes attendues : Id,Jour,Edition,Indexes. Sans Indexes, Id doit etre complet (premiere page)."
+        throw "Le fichier CSV ne contient aucun document valide. Colonnes attendues : Id,Filter,edition."
     }
 }
 else {
@@ -815,10 +1036,12 @@ else {
     }
 
     $documents += [PSCustomObject]@{
-        Id      = $Id.Trim()
-        Jour    = $Jour.Trim()
-        Edition = $Edition.Trim()
-        Indexes = (Convert-Indexes -IndexesText $Indexes)
+        Id           = $Id.Trim()
+        Filter       = $null
+        Jour         = $Jour.Trim()
+        Edition      = $Edition.Trim()
+        Indexes      = (Convert-Indexes -IndexesText $Indexes)
+        ResolvePages = $false
     }
 }
 
@@ -831,23 +1054,25 @@ foreach ($document in $documents) {
             -Jour $document.Jour `
             -Edition $document.Edition `
             -Indexes $document.Indexes `
+            -Filter $document.Filter `
+            -ResolvePages:$document.ResolvePages `
             -Session $Session `
             -KeepImages:$KeepImages
 
         $results += $result
     }
     catch {
-        Write-Warning "Echec pour $($document.Edition) / $($document.Id) $($document.Jour) : $($_.Exception.Message)"
+        Write-Warning "Echec pour $($document.Edition) / $($document.Id) : $($_.Exception.Message)"
 
         $results += [PSCustomObject]@{
-            Id      = $document.Id
-            Edition = $document.Edition
-            Jour    = $document.Jour
-            Date    = $null
-            Pages   = 0
-            PdfPath = $null
-            Success = $false
-            Skipped = $false
+            Id       = $document.Id
+            Edition  = $document.Edition
+            Date     = $null
+            Pages    = 0
+            PdfPath  = $null
+            Duration = $null
+            Success  = $false
+            Skipped  = $false
         }
     }
 }
@@ -855,19 +1080,40 @@ foreach ($document in $documents) {
 Write-Host ""
 Write-Host "================ RESUME ================"
 
-$results | Format-Table Edition, Id, Jour, Date, Pages, Success, Skipped, PdfPath -AutoSize
+$downloaded = @($results | Where-Object { $_.Success -and -not $_.Skipped -and $_.PdfPath })
 
-$successPdfs = @($results | Where-Object { $_.Success -and -not $_.Skipped -and $_.PdfPath })
+if ($downloaded.Count -gt 0) {
+    Write-Host "Publications telechargees :"
+    $downloaded |
+        Select-Object Edition, Id, Date, Pages,
+            @{ Name = "Duree"; Expression = { "{0:mm\:ss}" -f $_.Duration } },
+            PdfPath |
+        Format-Table -AutoSize
+
+    $totalDuration = [TimeSpan]::Zero
+    foreach ($item in $downloaded) {
+        $totalDuration += $item.Duration
+    }
+    Write-Host ("Duree totale des telechargements : {0:hh\:mm\:ss}" -f $totalDuration)
+}
+else {
+    Write-Host "Aucune nouvelle publication a telecharger."
+}
+
+$successPdfs = $downloaded
 
 if ($successPdfs.Count -eq 1) {
     Start-Process $successPdfs[0].PdfPath
 }
 elseif ($successPdfs.Count -gt 1) {
-    $runDateText = (Get-Date).ToString("yyyyMMdd")
-    $outputFolder = "C:\work\PERSO\eureka\journaux\$runDateText"
-    Start-Process $outputFolder
+    Start-Process (Join-Path $PSScriptRoot "journaux")
 }
 
 if (@($results | Where-Object { -not $_.Success }).Count -gt 0) {
     exit 1
+}
+
+}
+finally {
+    Stop-Transcript | Out-Null
 }

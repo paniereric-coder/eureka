@@ -1,8 +1,8 @@
-Id,Jour,edition,Indexes
-OP_P·1,J-1,Journal de Montreal,
-SOL_P·1,J-1,Sud Ouest Lot-et-Garonne,
-LM_P·1,J-0,Le Monde,
-OF_P·dof actu finistère_1,J-1,Ouest France quimper,
-TL_P·quimper,J-0,Le Télégramme - Quimper,"[1,23,24,25,26,27,28,29,30]"
-QSC_P·1,J-0,Quebec Science,
-MSJ_P·svie_001,J-28,Science et vie,
+Id,Filter,edition
+OP_P,,Journal de Montreal
+SOL_P,,Sud Ouest Lot-et-Garonne
+LM_P,,Le Monde
+OF_P,finistère,Ouest France quimper
+TL_P,quimper,Le Télégramme - Quimper
+QSC_P,,Quebec Science
+MSJ_P,svie,Science et vie
