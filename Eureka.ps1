@@ -508,6 +508,85 @@ Installe Python, puis Pillow avec :
     }
 }
 
+function Ensure-Pikepdf {
+    & py -c "import pikepdf" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "pikepdf n'est pas installe. Installation..."
+        & py -m pip install pikepdf
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Impossible d'installer pikepdf. Les metadonnees des PDF existants ne seront pas ajoutees."
+        }
+    }
+}
+
+function Update-EurekaPdfMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PdfPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Series,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Title,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PdfDate
+    )
+
+    $env:EUREKA_SERIES = $Series
+    $env:EUREKA_TITLE = $Title
+    $env:EUREKA_DATE = $PdfDate
+
+    $metaScript = Join-Path ([System.IO.Path]::GetTempPath()) ("eureka_meta_{0}.py" -f [Guid]::NewGuid().ToString("N"))
+
+    $metaCode = @"
+import os, sys
+try:
+    import pikepdf
+except ImportError:
+    sys.exit(0)
+
+path = r'''$PdfPath'''
+title = os.environ.get("EUREKA_TITLE", "")
+series = os.environ.get("EUREKA_SERIES", "")
+date = os.environ.get("EUREKA_DATE", "")
+
+with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+    di = pdf.docinfo
+    if str(di.get("/Producer", "")) == "Eureka":
+        sys.exit(0)
+    if title:
+        di["/Title"] = title
+    if series:
+        di["/Author"] = series
+        di["/Subject"] = series
+    di["/Creator"] = "Eureka"
+    di["/Producer"] = "Eureka"
+    if date:
+        di["/CreationDate"] = date
+    pdf.save()
+    print("updated")
+"@
+
+    $updated = $false
+    try {
+        [System.IO.File]::WriteAllText($metaScript, $metaCode, [System.Text.Encoding]::UTF8)
+        $output = & py $metaScript 2>$null
+        if ($output -match "updated") {
+            $updated = $true
+        }
+    }
+    catch {
+        Write-Warning "Impossible de mettre a jour les metadonnees de $PdfPath : $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item $metaScript -Force -ErrorAction SilentlyContinue
+    }
+
+    return $updated
+}
+
 function Download-EurekaDocument {
     param(
         [Parameter(Mandatory = $true)]
@@ -578,6 +657,12 @@ function Download-EurekaDocument {
     # La version lue sur le site est-elle deja presente dans le repo ? Si oui, pas de telechargement.
     if (Test-Path -LiteralPath $pdfPath -PathType Leaf) {
         Write-Host "$cleanEdition ($dateText) deja present, telechargement ignore : $pdfPath"
+
+        # Ajoute les metadonnees si le PDF existant n'en a pas encore.
+        $metaTitle = "$cleanEdition - $($pubDate.ToString('yyyy-MM-dd'))"
+        if (Update-EurekaPdfMetadata -PdfPath $pdfPath -Series $cleanEdition -Title $metaTitle -PdfDate ("D:" + $dateText + "000000")) {
+            Write-Host "Metadonnees ajoutees au PDF existant."
+        }
 
         return [PSCustomObject]@{
             Id       = $Id
@@ -872,14 +957,29 @@ function Download-EurekaDocument {
     Write-Host ("Nombre de pages detecte : {0}" -f $pages)
     Write-Host "Assemblage du PDF..."
 
+    # Metadonnees PDF pour Kavita (transmises au script Python via l'environnement).
+    $env:EUREKA_SERIES = $cleanEdition
+    $env:EUREKA_TITLE = "$cleanEdition - $($pubDate.ToString('yyyy-MM-dd'))"
+    $env:EUREKA_DATE = "D:" + $dateText + "000000"
+
     $pythonScript = Join-Path $env:TEMP ("eureka_assemble_{0}.py" -f [Guid]::NewGuid().ToString("N"))
 
     $pythonCode = @"
 from PIL import Image
 from pathlib import Path
+import os
 
 folder = Path(r'''$folder''')
 pdf_path = Path(r'''$pdfPath''')
+
+meta = {
+    "title": os.environ.get("EUREKA_TITLE", ""),
+    "author": os.environ.get("EUREKA_SERIES", ""),
+    "subject": os.environ.get("EUREKA_SERIES", ""),
+    "creator": "Eureka",
+    "producer": "Eureka",
+    "creationDate": os.environ.get("EUREKA_DATE", ""),
+}
 
 files = sorted(folder.glob("page-*.png"))
 if not files:
@@ -888,12 +988,11 @@ if not files:
 images = [Image.open(f).convert("RGB") for f in files]
 
 try:
-    images[0].save(
-        pdf_path,
-        "PDF",
-        save_all=True,
-        append_images=images[1:]
-    )
+    try:
+        images[0].save(pdf_path, "PDF", save_all=True, append_images=images[1:], **meta)
+    except TypeError:
+        meta.pop("creationDate", None)
+        images[0].save(pdf_path, "PDF", save_all=True, append_images=images[1:], **meta)
 finally:
     for img in images:
         img.close()
@@ -998,6 +1097,7 @@ Effectuez une seule fois :
 }
 
 Ensure-Pillow
+Ensure-Pikepdf
 
 $documents = @()
 
