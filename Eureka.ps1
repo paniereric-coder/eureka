@@ -292,6 +292,22 @@ function Test-EndOfDocumentError {
     )
 }
 
+function Test-SessionExpiredError {
+    param(
+        [Parameter(Mandatory = $true)]
+        $ErrorRecord
+    )
+
+    $message = [string]$ErrorRecord.Exception.Message
+
+    return (
+        $message -match '\b401\b' -or
+        $message -match 'Unauthorized' -or
+        $message -match "Login\?ErrorCode" -or
+        $message -match "session Eureka a expire"
+    )
+}
+
 
 function Convert-Indexes {
     param(
@@ -926,7 +942,9 @@ finally:
 
 $logFolder = Join-Path $PSScriptRoot "logs"
 New-Item -ItemType Directory -Force -Path $logFolder | Out-Null
-$outputLog = Join-Path $logFolder ("eureka_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$runStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$outputLog = Join-Path $logFolder ("eureka_{0}.log" -f $runStamp)
+$markdownLog = Join-Path $logFolder ("eureka_{0}.md" -f $runStamp)
 Start-Transcript -Path $outputLog | Out-Null
 
 try {
@@ -952,6 +970,8 @@ soit un fichier CSV (colonnes : Id,Filter,Jour,Edition) :
 if (-not [string]::IsNullOrWhiteSpace($Id) -and -not [string]::IsNullOrWhiteSpace($Liste)) {
     throw "Utilisez soit -Id/-Jour, soit -Liste, mais pas les deux en meme temps."
 }
+
+$credential = $null
 
 if (-not $Session) {
     if (-not (Test-Path $CredentialPath)) {
@@ -1048,31 +1068,52 @@ else {
 $results = @()
 
 foreach ($document in $documents) {
-    try {
-        $result = Download-EurekaDocument `
-            -Id $document.Id `
-            -Jour $document.Jour `
-            -Edition $document.Edition `
-            -Indexes $document.Indexes `
-            -Filter $document.Filter `
-            -ResolvePages:$document.ResolvePages `
-            -Session $Session `
-            -KeepImages:$KeepImages
+    $attempt = 0
 
-        $results += $result
-    }
-    catch {
-        Write-Warning "Echec pour $($document.Edition) / $($document.Id) : $($_.Exception.Message)"
+    while ($true) {
+        $attempt++
 
-        $results += [PSCustomObject]@{
-            Id       = $document.Id
-            Edition  = $document.Edition
-            Date     = $null
-            Pages    = 0
-            PdfPath  = $null
-            Duration = $null
-            Success  = $false
-            Skipped  = $false
+        try {
+            $result = Download-EurekaDocument `
+                -Id $document.Id `
+                -Jour $document.Jour `
+                -Edition $document.Edition `
+                -Indexes $document.Indexes `
+                -Filter $document.Filter `
+                -ResolvePages:$document.ResolvePages `
+                -Session $Session `
+                -KeepImages:$KeepImages
+
+            $results += $result
+            break
+        }
+        catch {
+            # Session expiree en cours de route : une seule tentative de reconnexion.
+            if ($attempt -eq 1 -and $credential -and (Test-SessionExpiredError -ErrorRecord $_)) {
+                Write-Warning "Session Eureka expiree. Reconnexion et nouvelle tentative pour $($document.Edition)..."
+
+                try {
+                    $Session = New-EurekaSessionFromVarennes -Credential $credential
+                    continue
+                }
+                catch {
+                    Write-Warning "Echec de la reconnexion : $($_.Exception.Message)"
+                }
+            }
+
+            Write-Warning "Echec pour $($document.Edition) / $($document.Id) : $($_.Exception.Message)"
+
+            $results += [PSCustomObject]@{
+                Id       = $document.Id
+                Edition  = $document.Edition
+                Date     = $null
+                Pages    = 0
+                PdfPath  = $null
+                Duration = $null
+                Success  = $false
+                Skipped  = $false
+            }
+            break
         }
     }
 }
@@ -1086,8 +1127,7 @@ if ($downloaded.Count -gt 0) {
     Write-Host "Publications telechargees :"
     $downloaded |
         Select-Object Edition, Id, Date, Pages,
-            @{ Name = "Duree"; Expression = { "{0:mm\:ss}" -f $_.Duration } },
-            PdfPath |
+            @{ Name = "Duree"; Expression = { "{0:mm\:ss}" -f $_.Duration } } |
         Format-Table -AutoSize
 
     $totalDuration = [TimeSpan]::Zero
@@ -1095,6 +1135,28 @@ if ($downloaded.Count -gt 0) {
         $totalDuration += $item.Duration
     }
     Write-Host ("Duree totale des telechargements : {0:hh\:mm\:ss}" -f $totalDuration)
+
+    # Resume Markdown : chaque Edition est un lien direct vers son PDF.
+    $logFolderUri = [System.Uri]((Resolve-Path $logFolder).Path.TrimEnd('\') + '\')
+
+    $markdown = New-Object System.Collections.Generic.List[string]
+    $markdown.Add("# Eureka - $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
+    $markdown.Add("")
+    $markdown.Add("| Edition | Id | Date | Pages | Duree |")
+    $markdown.Add("|---------|----|------|-------|-------|")
+
+    foreach ($item in $downloaded) {
+        $relativeUrl = $logFolderUri.MakeRelativeUri([System.Uri]$item.PdfPath).ToString()
+        $editionLabel = ([string]$item.Edition) -replace '\|', '\|'
+        $duree = "{0:mm\:ss}" -f $item.Duration
+        $markdown.Add("| [$editionLabel]($relativeUrl) | $($item.Id) | $($item.Date) | $($item.Pages) | $duree |")
+    }
+
+    $markdown.Add("")
+    $markdown.Add("**Duree totale : $("{0:hh\:mm\:ss}" -f $totalDuration)**")
+
+    Set-Content -Path $markdownLog -Value $markdown -Encoding UTF8
+    Write-Host ("Resume Markdown : {0}" -f $markdownLog)
 }
 else {
     Write-Host "Aucune nouvelle publication a telecharger."
