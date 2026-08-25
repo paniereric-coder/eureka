@@ -1,3 +1,4 @@
 journaux/
 *log.txt
+logs/
 *.log

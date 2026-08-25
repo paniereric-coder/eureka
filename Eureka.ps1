@@ -944,7 +944,6 @@ $logFolder = Join-Path $PSScriptRoot "logs"
 New-Item -ItemType Directory -Force -Path $logFolder | Out-Null
 $runStamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $outputLog = Join-Path $logFolder ("eureka_{0}.log" -f $runStamp)
-$markdownLog = Join-Path $logFolder ("eureka_{0}.md" -f $runStamp)
 Start-Transcript -Path $outputLog | Out-Null
 
 try {
@@ -1135,32 +1134,58 @@ if ($downloaded.Count -gt 0) {
         $totalDuration += $item.Duration
     }
     Write-Host ("Duree totale des telechargements : {0:hh\:mm\:ss}" -f $totalDuration)
-
-    # Resume Markdown : chaque Edition est un lien direct vers son PDF.
-    $logFolderUri = [System.Uri]((Resolve-Path $logFolder).Path.TrimEnd('\') + '\')
-
-    $markdown = New-Object System.Collections.Generic.List[string]
-    $markdown.Add("# Eureka - $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
-    $markdown.Add("")
-    $markdown.Add("| Edition | Id | Date | Pages | Duree |")
-    $markdown.Add("|---------|----|------|-------|-------|")
-
-    foreach ($item in $downloaded) {
-        $relativeUrl = $logFolderUri.MakeRelativeUri([System.Uri]$item.PdfPath).ToString()
-        $editionLabel = ([string]$item.Edition) -replace '\|', '\|'
-        $duree = "{0:mm\:ss}" -f $item.Duration
-        $markdown.Add("| [$editionLabel]($relativeUrl) | $($item.Id) | $($item.Date) | $($item.Pages) | $duree |")
-    }
-
-    $markdown.Add("")
-    $markdown.Add("**Duree totale : $("{0:hh\:mm\:ss}" -f $totalDuration)**")
-
-    Set-Content -Path $markdownLog -Value $markdown -Encoding UTF8
-    Write-Host ("Resume Markdown : {0}" -f $markdownLog)
 }
 else {
     Write-Host "Aucune nouvelle publication a telecharger."
 }
+
+# sommaire.md : publication la plus recente par edition ; etoile = telechargee lors de la derniere execution.
+$journauxFolder = Join-Path $PSScriptRoot "journaux"
+$sommairePath = Join-Path $PSScriptRoot "sommaire.md"
+$repoUri = [System.Uri]((Resolve-Path $PSScriptRoot).Path.TrimEnd('\') + '\')
+
+$newPdfPaths = @{}
+foreach ($item in $downloaded) {
+    $newPdfPaths[[System.IO.Path]::GetFullPath($item.PdfPath)] = $true
+}
+
+$markdown = New-Object System.Collections.Generic.List[string]
+$markdown.Add("# Sommaire des journaux - $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
+$markdown.Add("")
+$markdown.Add("> ⭐ = telecharge lors de la derniere execution")
+$markdown.Add("")
+$markdown.Add("| Edition | Date | Nouveau |")
+$markdown.Add("|---------|------|---------|")
+
+if (Test-Path $journauxFolder) {
+    $editions = Get-ChildItem -Path $journauxFolder -Directory | Sort-Object Name
+
+    foreach ($editionDir in $editions) {
+        # Nom de fichier yyyyMMdd.pdf : le tri descendant donne la publication la plus recente.
+        $latestPdf = Get-ChildItem -Path $editionDir.FullName -Filter *.pdf -File |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+
+        if (-not $latestPdf) {
+            continue
+        }
+
+        $editionLabel = ($editionDir.Name) -replace '\|', '\|'
+        $rawDate = [System.IO.Path]::GetFileNameWithoutExtension($latestPdf.Name)
+        if ($rawDate -match '^\d{8}$') {
+            $dateLabel = "{0}-{1}-{2}" -f $rawDate.Substring(0, 4), $rawDate.Substring(4, 2), $rawDate.Substring(6, 2)
+        }
+        else {
+            $dateLabel = $rawDate
+        }
+        $relativeUrl = $repoUri.MakeRelativeUri([System.Uri]$latestPdf.FullName).ToString()
+        $star = if ($newPdfPaths.ContainsKey($latestPdf.FullName)) { "⭐" } else { "" }
+        $markdown.Add("| [$editionLabel]($relativeUrl) | $dateLabel | $star |")
+    }
+}
+
+Set-Content -Path $sommairePath -Value $markdown -Encoding UTF8
+Write-Host ("Sommaire Markdown : {0}" -f $sommairePath)
 
 $successPdfs = $downloaded
 
