@@ -567,8 +567,8 @@ function Download-EurekaDocument {
 
     $dateText = $pubDate.ToString("yyyyMMdd")
 
-    # Chaque PDF est range dans le repo : journaux/<edition>/<date>.pdf
-    $outputFolder = Join-Path $PSScriptRoot "journaux" $safeEdition
+    # Chaque PDF est range dans : ~/Kavita/journaux/<edition>/<date>.pdf
+    $outputFolder = Join-Path $HOME "Kavita" "journaux" $safeEdition
     $pdfName = "$dateText.pdf"
     $pdfPath = Join-Path $outputFolder $pdfName
 
@@ -1140,10 +1140,12 @@ else {
 }
 
 # sommaire.md : publication la plus recente par edition ; etoile = telechargee lors de la derniere execution.
-$journauxFolder = Join-Path $PSScriptRoot "journaux"
-$sommairePath = Join-Path $PSScriptRoot "sommaire.md"
+$kavitaRoot = Join-Path $HOME "Kavita"
+New-Item -ItemType Directory -Force -Path $kavitaRoot | Out-Null
+$journauxFolder = Join-Path $kavitaRoot "journaux"
+$sommairePath = Join-Path $kavitaRoot "sommaire.md"
 $dirSeparator = [System.IO.Path]::DirectorySeparatorChar
-$repoUri = [System.Uri]((Resolve-Path $PSScriptRoot).Path.TrimEnd($dirSeparator) + $dirSeparator)
+$baseUri = [System.Uri]((Resolve-Path $kavitaRoot).Path.TrimEnd($dirSeparator) + $dirSeparator)
 
 $newPdfPaths = @{}
 foreach ($item in $downloaded) {
@@ -1179,7 +1181,7 @@ if (Test-Path $journauxFolder) {
         else {
             $dateLabel = $rawDate
         }
-        $relativeUrl = $repoUri.MakeRelativeUri([System.Uri]$latestPdf.FullName).ToString()
+        $relativeUrl = $baseUri.MakeRelativeUri([System.Uri]$latestPdf.FullName).ToString()
         $star = if ($newPdfPaths.ContainsKey($latestPdf.FullName)) { "⭐" } else { "" }
         $markdown.Add("| [$editionLabel]($relativeUrl) | $dateLabel | $star |")
     }
@@ -1194,7 +1196,7 @@ if ($successPdfs.Count -eq 1) {
     & open $successPdfs[0].PdfPath
 }
 elseif ($successPdfs.Count -gt 1) {
-    & open (Join-Path $PSScriptRoot "journaux")
+    & open $journauxFolder
 }
 
 if (@($results | Where-Object { -not $_.Success }).Count -gt 0) {
