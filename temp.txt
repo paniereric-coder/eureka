@@ -4,7 +4,7 @@ Crée :
 
 nano ~/Library/LaunchAgents/com.eureka.daily.plist
 
-Colle ceci, en adaptant /Users/admin/Eureka et éventuellement le chemin de pwsh :
+Colle ceci, en adaptant /Volumes/Samsung/git/eureka et éventuellement le chemin de pwsh :
 
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -23,11 +23,11 @@ Colle ceci, en adaptant /Users/admin/Eureka et éventuellement le chemin de pwsh
         <string>/opt/homebrew/bin/pwsh</string>
         <string>-NoProfile</string>
         <string>-File</string>
-        <string>/Users/admin/Eureka/Run-Eureka.ps1</string>
+        <string>/Volumes/Samsung/git/eureka/Run-Eureka.ps1</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/admin/Eureka</string>
+    <string>/Volumes/Samsung/git/eureka</string>
 
     <key>StartCalendarInterval</key>
     <dict>
@@ -38,10 +38,10 @@ Colle ceci, en adaptant /Users/admin/Eureka et éventuellement le chemin de pwsh
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/admin/Eureka/eureka-launchd.log</string>
+    <string>/Volumes/Samsung/git/eureka/eureka-launchd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/admin/Eureka/eureka-launchd-error.log</string>
+    <string>/Volumes/Samsung/git/eureka/eureka-launchd-error.log</string>
 
 </dict>
 </plist>
@@ -97,3 +97,104 @@ Tu peux voir la configuration actuelle avec :
 pmset -g
 
 Si tu me donnes le résultat de which pwsh, echo $HOME et pmset -g, je peux te donner le .plist exact pour ton Mac mini et te dire quoi régler pour qu'Eureka soit réellement téléchargé chaque matin à 7 h, même sans intervention.
+
+admin@Mac-mini eureka % pmset -g
+System-wide power settings:
+Currently in use:
+ standby              1
+ Sleep On Power Button 1
+ womp                 1
+ autorestart          0
+ hibernatefile        /var/vm/sleepimage
+ proximitywake        1
+ powernap             1
+ gpuswitch            2
+ networkoversleep     0
+ disksleep            10
+ standbydelayhigh     86400
+ sleep                10
+ hibernatemode        3
+ ttyskeepawake        1
+ displaysleep         10
+ tcpkeepalive         1
+ highstandbythreshold 50
+ standbydelaylow      86400
+
+ admin@Mac-mini eureka % launchctl print gui/$(id -u)/com.eureka.daily
+gui/501/com.eureka.daily = {
+	active count = 0
+	path = /Users/admin/Library/LaunchAgents/com.eureka.daily.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /usr/bin/caffeinate
+	arguments = {
+		/usr/bin/caffeinate
+		-i
+		/opt/homebrew/bin/pwsh
+		-NoProfile
+		-File
+		/Volumes/Samsung/git/eureka/Run-Eureka.ps1
+	}
+
+	working directory = /Volumes/Samsung/git/eureka
+
+	stdout path = /Volumes/Samsung/git/eureka/eureka-launchd.log
+	stderr path = /Volumes/Samsung/git/eureka/eureka-launchd-error.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /private/tmp/com.apple.launchd.XYXAhzskHL/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		XPC_SERVICE_NAME => com.eureka.daily
+	}
+
+	domain = gui/501 [100002]
+	asid = 100002
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	last exit code = 78: EX_CONFIG
+
+	event triggers = {
+		com.eureka.daily.268435472 => {
+			keepalive = 0
+			service = com.eureka.daily
+			stream = com.apple.launchd.calendarinterval
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 7
+			}
+		}
+	}
+
+	event channels = {
+		"com.apple.launchd.calendarinterval" = {
+			port = 0xef0b7
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 1
+		}
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	probabilistic guard malloc policy = {
+		activation rate = 1/1000
+		sample rate = 1/0
+	}
+
+	properties = inferred program
+}
