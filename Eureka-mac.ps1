@@ -519,72 +519,38 @@ function Ensure-Pikepdf {
     }
 }
 
-function Update-EurekaPdfMetadata {
+
+function Set-EurekaEbookMetadata {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$PdfPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Series,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Title,
-
-        [Parameter(Mandatory = $true)]
-        [string]$PdfDate
+        [string]$PdfPath
     )
 
-    $env:EUREKA_SERIES = $Series
-    $env:EUREKA_TITLE = $Title
-    $env:EUREKA_DATE = $PdfDate
+    $pdf = Get-Item -LiteralPath $PdfPath -ErrorAction Stop
+    $series = $pdf.Directory.Name
+    $index = [System.IO.Path]::GetFileNameWithoutExtension($pdf.Name)
 
-    $metaScript = Join-Path ([System.IO.Path]::GetTempPath()) ("eureka_meta_{0}.py" -f [Guid]::NewGuid().ToString("N"))
-
-    $metaCode = @"
-import os, sys
-try:
-    import pikepdf
-except ImportError:
-    sys.exit(0)
-
-path = r'''$PdfPath'''
-title = os.environ.get("EUREKA_TITLE", "")
-series = os.environ.get("EUREKA_SERIES", "")
-date = os.environ.get("EUREKA_DATE", "")
-
-with pikepdf.open(path, allow_overwriting_input=True) as pdf:
-    di = pdf.docinfo
-    if str(di.get("/Producer", "")) == "Eureka":
-        sys.exit(0)
-    if title:
-        di["/Title"] = title
-    if series:
-        di["/Author"] = series
-        di["/Subject"] = series
-    di["/Creator"] = "Eureka"
-    di["/Producer"] = "Eureka"
-    if date:
-        di["/CreationDate"] = date
-    pdf.save()
-    print("updated")
-"@
-
-    $updated = $false
-    try {
-        [System.IO.File]::WriteAllText($metaScript, $metaCode, [System.Text.Encoding]::UTF8)
-        $output = & python3 $metaScript 2>$null
-        if ($output -match "updated") {
-            $updated = $true
-        }
+    if ($index -match '^\d{8}$') {
+        $date = [datetime]::ParseExact($index, 'yyyyMMdd', $null)
+        $title = "$series - $($date.ToString('yyyy-MM-dd'))"
     }
-    catch {
-        Write-Warning "Impossible de mettre a jour les metadonnees de $PdfPath : $($_.Exception.Message)"
-    }
-    finally {
-        Remove-Item $metaScript -Force -ErrorAction SilentlyContinue
+    else {
+        $title = "$series - $index"
     }
 
-    return $updated
+    $ebookMeta = '/usr/local/bin/ebook-meta'
+    if (-not (Test-Path -LiteralPath $ebookMeta -PathType Leaf)) {
+        Write-Warning "ebook-meta est introuvable : $ebookMeta"
+        return $false
+    }
+
+    & $ebookMeta --title $title --series $series --index $index $pdf.FullName
+    if ($LASTEXITCODE -ne 0) {
+        throw "ebook-meta a echoue pour $($pdf.FullName) (code $LASTEXITCODE)."
+    }
+
+    Write-Host "Metadonnees ebook ajoutees : $($pdf.FullName)"
+    return $true
 }
 
 function Download-EurekaDocument {
@@ -660,9 +626,8 @@ function Download-EurekaDocument {
 
         # Ajoute les metadonnees si le PDF existant n'en a pas encore.
         $metaTitle = "$cleanEdition - $($pubDate.ToString('yyyy-MM-dd'))"
-        if (Update-EurekaPdfMetadata -PdfPath $pdfPath -Series $cleanEdition -Title $metaTitle -PdfDate ("D:" + $dateText + "000000")) {
-            Write-Host "Metadonnees ajoutees au PDF existant."
-        }
+        
+        Set-EurekaEbookMetadata -PdfPath $pdfPath | Out-Null
 
         return [PSCustomObject]@{
             Id       = $Id
@@ -1015,6 +980,8 @@ finally:
     if ($pythonExitCode -ne 0 -or -not (Test-Path $pdfPath)) {
         throw "L'assemblage PDF a echoue pour $Id."
     }
+
+    Set-EurekaEbookMetadata -PdfPath $pdfPath | Out-Null
 
     if (-not $KeepImages) {
         Get-ChildItem -Path $folder -Filter "page-*.png" |
