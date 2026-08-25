@@ -1144,8 +1144,7 @@ $kavitaRoot = Join-Path $HOME "Kavita"
 New-Item -ItemType Directory -Force -Path $kavitaRoot | Out-Null
 $journauxFolder = Join-Path $kavitaRoot "journaux"
 $sommairePath = Join-Path $kavitaRoot "sommaire.md"
-$dirSeparator = [System.IO.Path]::DirectorySeparatorChar
-$baseUri = [System.Uri]((Resolve-Path $kavitaRoot).Path.TrimEnd($dirSeparator) + $dirSeparator)
+$kavitaRootFull = (Resolve-Path $kavitaRoot).Path
 
 $newPdfPaths = @{}
 foreach ($item in $downloaded) {
@@ -1181,7 +1180,9 @@ if (Test-Path $journauxFolder) {
         else {
             $dateLabel = $rawDate
         }
-        $relativeUrl = $baseUri.MakeRelativeUri([System.Uri]$latestPdf.FullName).ToString()
+        # Chemin relatif au dossier Kavita, encode segment par segment (compatible macOS/Windows).
+        $relativePath = ($latestPdf.FullName.Substring($kavitaRootFull.Length) -replace '\\', '/').TrimStart('/')
+        $relativeUrl = ($relativePath -split '/' | ForEach-Object { [System.Uri]::EscapeDataString($_) }) -join '/'
         $star = if ($newPdfPaths.ContainsKey($latestPdf.FullName)) { "⭐" } else { "" }
         $markdown.Add("| [$editionLabel]($relativeUrl) | $dateLabel | $star |")
     }

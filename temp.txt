@@ -1,0 +1,99 @@
+Créer la tâche launchd
+
+Crée :
+
+nano ~/Library/LaunchAgents/com.eureka.daily.plist
+
+Colle ceci, en adaptant /Users/admin/Eureka et éventuellement le chemin de pwsh :
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+
+<plist version="1.0">
+<dict>
+
+    <key>Label</key>
+    <string>com.eureka.daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/opt/homebrew/bin/pwsh</string>
+        <string>-NoProfile</string>
+        <string>-File</string>
+        <string>/Users/admin/Eureka/Run-Eureka.ps1</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/admin/Eureka</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/admin/Eureka/eureka-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/admin/Eureka/eureka-launchd-error.log</string>
+
+</dict>
+</plist>
+
+caffeinate -i empêchera le Mac de se mettre en veille pendant l'exécution de ton script.
+
+Dans nano :
+
+Ctrl+O → Entrée → Ctrl+X
+
+4. Vérifier le fichier
+
+Avant de l'activer :
+
+plutil -lint ~/Library/LaunchAgents/com.eureka.daily.plist
+
+Tu dois avoir :
+
+OK
+5. Activer la tâche
+
+Utilise :
+
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.eureka.daily.plist
+
+Puis vérifie :
+
+launchctl print gui/$(id -u)/com.eureka.daily
+
+Tu devrais voir les informations de la tâche.
+
+6. La tester immédiatement
+
+Pas besoin d'attendre demain 7 h :
+
+launchctl kickstart -k gui/$(id -u)/com.eureka.daily
+
+Puis :
+
+tail -f ~/Eureka/eureka-launchd.log
+
+Pour les erreurs :
+
+tail -f ~/Eureka/eureka-launchd-error.log
+Attention à la veille du Mac mini
+
+Il y a une subtilité importante : caffeinate empêche le Mac de dormir une fois le script lancé. Il ne garantit pas qu'un Mac déjà endormi à 7 h se réveillera pour launchd.
+
+Pour un Mac mini utilisé comme serveur Kavita + Eureka, je configurerais plutôt macOS pour qu'il reste disponible en permanence, tout en permettant à l'écran de s'éteindre.
+
+Tu peux voir la configuration actuelle avec :
+
+pmset -g
+
+Si tu me donnes le résultat de which pwsh, echo $HOME et pmset -g, je peux te donner le .plist exact pour ton Mac mini et te dire quoi régler pour qu'Eureka soit réellement téléchargé chaque matin à 7 h, même sans intervention.
